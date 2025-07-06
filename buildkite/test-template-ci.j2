@@ -519,7 +519,9 @@ steps:
     commands:
       - yes | docker system prune -a
       - bash .buildkite/scripts/tpu/cleanup_docker.sh
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=0 --tag vllm/vllm-tpu-bm --progress plain -f docker/Dockerfile.tpu ."
       - bash .buildkite/scripts/tpu/docker_run_bm.sh .buildkite/scripts/tpu/config_v6e_1.env
+      - bash .buildkite/scripts/tpu/docker_run_bm.sh .buildkite/scripts/tpu/quantized_v6e_1.env
 
   {% if branch == "main" %}
   - label: "TPU V1 Test Notification"
