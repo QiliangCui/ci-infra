@@ -69,6 +69,19 @@ module "ci_cpu" {
   huggingface_token_value          = data.google_secret_manager_secret_version.huggingface_token.secret_data
 }
 
+module "ci_h100_8" {
+  source    = "../modules/ci_h100_8"
+  providers = {
+    google-beta = google-beta.us-central1-a
+  }
+
+  project_id              = var.project_id
+  instance_count          = 1
+  buildkite_queue_name    = "h100_8_queue"
+  buildkite_token_value   = data.google_secret_manager_secret_version.buildkite_agent_token_ci_cluster.secret_data
+  huggingface_token_value = data.google_secret_manager_secret_version.huggingface_token.secret_data
+}
+
 # module "ci_v5" {
 #   source = "./modules/ci_v5"
 #   providers = {

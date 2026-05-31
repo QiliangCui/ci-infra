@@ -26,6 +26,13 @@ provider "google-beta" {
 
 provider "google-beta" {
   project = var.project_id
+  region  = "us-central1"
+  zone    = "us-central1-a"
+  alias   = "us-central1-a"
+}
+
+provider "google-beta" {
+  project = var.project_id
   region  = "southamerica-west1"
   zone    = "southamerica-west1-a"
   alias   = "southamerica-west1-a"
