@@ -61,9 +61,28 @@ resource "google_compute_instance" "buildkite-agent-instance" {
       echo "deb [signed-by=/usr/share/keyrings/buildkite-agent-archive-keyring.gpg] https://apt.buildkite.com/buildkite-agent stable main" | sudo tee /etc/apt/sources.list.d/buildkite-agent.list
       apt-get update
       apt-get install -y bk buildkite-agent
+
+      # ==========================================
+      # Ensure the agent never starts before this startup script has finished.
+      # systemd auto-starts the enabled buildkite-agent unit at boot, in parallel with
+      # google-startup-scripts.service, so without this drop-in the agent comes online
+      # well before the script configures docker's data-root and writes the agent
+      # environment hook, and starts accepting jobs against a half-provisioned machine.
+      # Ordering only (After=): google-startup-scripts.service is Type=oneshot with
+      # RemainAfterExit=no, so a Requires=/Wants= dependency would re-run this entire
+      # startup script on any later `systemctl restart buildkite-agent`.
+      # ==========================================
+      mkdir -p /etc/systemd/system/buildkite-agent.service.d
+      # printf (not a heredoc): a heredoc terminator inside this indented
+      # template would have to land at column 0 after rendering.
+      printf '[Unit]\nAfter=google-startup-scripts.service\n' \
+        > /etc/systemd/system/buildkite-agent.service.d/10-after-startup-script.conf
+      systemctl daemon-reload
            
-      # Force stop the buildkite-agent and start at the end to avoid race condition
-      sudo systemctl stop buildkite-agent
+      # Stop the agent that systemd auto-started at boot. The After= drop-in above only
+      # takes effect from the NEXT boot onward, so this still matters on the first boot
+      # after this change lands.
+      sudo systemctl stop buildkite-agent 2>/dev/null || true
 
       # ==========================================
       # Setup In-Memory GitHub App Authentication
@@ -137,7 +156,9 @@ resource "google_compute_instance" "buildkite-agent-instance" {
       systemctl start docker
 
       systemctl enable buildkite-agent
-      systemctl start buildkite-agent
+      # --no-block is REQUIRED: this runs inside google-startup-scripts.service and the
+      # After= drop-in orders the agent behind that unit; a blocking start would deadlock.
+      systemctl start --no-block buildkite-agent
     STARTUP_SCRIPT
   }
 }

@@ -46,6 +46,12 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
     "startup-script" = <<-STARTUP_SCRIPT
       #!/bin/bash
 
+      # Stop the agent as early as possible: it was started automatically at boot and the
+      # ordering drop-in below only takes effect from the NEXT boot onward. Doing this
+      # first shrinks the window in which it can accept a job against a not-yet-mounted
+      # disk from ~90s to ~2s.
+      systemctl stop buildkite-agent 2>/dev/null || true
+
       apt-get update
       apt-get install -y curl build-essential jq git python3 python3-pip
 
@@ -58,9 +64,30 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       echo "deb [signed-by=/usr/share/keyrings/buildkite-agent-archive-keyring.gpg] https://apt.buildkite.com/buildkite-agent stable main" | sudo tee /etc/apt/sources.list.d/buildkite-agent.list
       apt-get update
       apt-get install -y buildkite-agent
+
+      # ==========================================
+      # Ensure the agent never starts before this startup script has finished.
+      # systemd auto-starts the enabled buildkite-agent unit at boot, in parallel with
+      # google-startup-scripts.service, so without this drop-in the agent comes online
+      # ~90s before the script mounts /mnt/disks/persist and starts accepting jobs that then
+      # fail (e.g. "mkdir: cannot create directory '/mnt/disks/persist': Permission denied").
+      # Ordering only (After=): google-startup-scripts.service is Type=oneshot with
+      # RemainAfterExit=no, so a Requires=/Wants= dependency would re-run this entire
+      # startup script on any later `systemctl restart buildkite-agent`.
+      # ==========================================
+      mkdir -p /etc/systemd/system/buildkite-agent.service.d
+      # printf (not a heredoc): a heredoc terminator inside this indented
+      # template would have to land at column 0 after rendering.
+      printf '[Unit]\nAfter=google-startup-scripts.service\n' \
+        > /etc/systemd/system/buildkite-agent.service.d/10-after-startup-script.conf
+      # The agent is useless without the persistent disk; refuse to start if it is missing
+      # rather than accepting jobs that will fail on an unmounted path.
+      printf 'ConditionPathIsMountPoint=/mnt/disks/persist\n' \
+        >> /etc/systemd/system/buildkite-agent.service.d/10-after-startup-script.conf
+      systemctl daemon-reload
      
-      # Force stop the buildkite-agent and start at the end to avoid race condition
-      sudo systemctl stop buildkite-agent
+      # Already stopped at the top of this script; kept as a no-op safety net.
+      sudo systemctl stop buildkite-agent 2>/dev/null || true
 
       # ==========================================
       # Setup In-Memory GitHub App Authentication
@@ -208,7 +235,9 @@ resource "google_tpu_v2_vm" "tpu_v6_ci" {
       sudo logrotate -f /etc/logrotate.conf
 
       systemctl enable buildkite-agent
-      systemctl start buildkite-agent
+      # --no-block is REQUIRED: this runs inside google-startup-scripts.service and the
+      # After= drop-in orders the agent behind that unit; a blocking start would deadlock.
+      systemctl start --no-block buildkite-agent
     STARTUP_SCRIPT
   }
 }

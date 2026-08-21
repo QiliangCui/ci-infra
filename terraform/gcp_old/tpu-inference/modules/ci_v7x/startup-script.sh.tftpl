@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# Stop the agent as early as possible: it was started automatically at boot and the
+# ordering drop-in below only takes effect from the NEXT boot onward. Doing this first
+# (instead of after the apt/cargo installs) shrinks the window in which it can accept a
+# job against a not-yet-mounted disk from ~90s to ~2s.
+systemctl stop buildkite-agent 2>/dev/null || true
+
 apt-get update
 apt-get install -y curl build-essential jq git python3 python3-pip
 
@@ -13,8 +19,25 @@ echo "deb [signed-by=/usr/share/keyrings/buildkite-agent-archive-keyring.gpg] ht
 apt-get update
 apt-get install -y buildkite-agent
 
-# Force stop the buildkite-agent and start at the end to avoid race condition
-sudo systemctl stop buildkite-agent
+# ==========================================
+# Ensure the agent never starts before this startup script has finished.
+# systemd auto-starts the enabled buildkite-agent unit at boot, in parallel with
+# google-startup-scripts.service, so without this drop-in the agent comes online
+# ~90s before the script mounts /mnt/disks/persist and starts accepting jobs that then
+# fail (e.g. "mkdir: cannot create directory '/mnt/disks/persist': Permission denied").
+# Ordering only (After=): google-startup-scripts.service is Type=oneshot with
+# RemainAfterExit=no, so a Requires=/Wants= dependency would re-run this entire
+# startup script on any later `systemctl restart buildkite-agent`.
+# ==========================================
+mkdir -p /etc/systemd/system/buildkite-agent.service.d
+# printf (not a heredoc): a heredoc terminator inside this indented
+# template would have to land at column 0 after rendering.
+printf '[Unit]\nAfter=google-startup-scripts.service\n' \
+  > /etc/systemd/system/buildkite-agent.service.d/10-after-startup-script.conf
+systemctl daemon-reload
+
+# Already stopped at the top of this script; kept as a no-op safety net.
+sudo systemctl stop buildkite-agent 2>/dev/null || true
 
 %{ if is_multi_host ~}
 # ==========================================
@@ -191,6 +214,12 @@ sudo ln -s /mnt/disks/persist/tpu_jax_cache /tmp/tpu_jax_cache
 echo "Setting up daily cron job for JAX cache cleanup..."
 echo -e '0 2 * * * root find /mnt/disks/persist/tpu_jax_cache -type f -mtime +30 -delete > /dev/null 2>&1\n30 2 * * * root find /mnt/disks/persist/tpu_jax_cache -type d -empty -delete > /dev/null 2>&1' | sudo tee /etc/cron.d/tpu_cache_cleanup
 sudo chmod 0644 /etc/cron.d/tpu_cache_cleanup
+
+# The agent is useless without the persistent disk; refuse to start if it is missing
+# rather than accepting jobs that will fail on an unmounted path.
+printf 'ConditionPathIsMountPoint=/mnt/disks/persist\n' \
+  >> /etc/systemd/system/buildkite-agent.service.d/10-after-startup-script.conf
+systemctl daemon-reload
 %{ endif ~}
 
 # ==========================================
@@ -211,7 +240,11 @@ sudo bash add-google-cloud-ops-agent-repo.sh --also-install
 if [ "$WORKER_ID" == "0" ]; then
   echo "Host 0: Starting Buildkite Agent..."
   systemctl enable buildkite-agent
-  systemctl start buildkite-agent
+  # --no-block is REQUIRED: this runs inside google-startup-scripts.service, and the
+  # After= drop-in orders the agent's start job behind that very unit. A blocking
+  # `systemctl start` would wait for a service that is waiting for this script = deadlock
+  # (google-startup-scripts.service has TimeoutStartUSec=infinity).
+  systemctl start --no-block buildkite-agent
 else
   echo "Host $WORKER_ID: Dependencies installed, skipping Agent startup."
   systemctl disable buildkite-agent
